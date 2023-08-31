@@ -2,10 +2,14 @@
 #include <fstream>
 #include <WinSock2.h>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_map>
+#include <chrono>
 #pragma comment(lib, "ws2_32.lib")
 
 const int PORT = 50505;
 const int BUFFER_SIZE = 2048;
+const int TIMEOUT = 1000;
 
 
 int main(int argc, char* argv[]) {
@@ -68,49 +72,64 @@ int main(int argc, char* argv[]) {
     std::string outDirectory = argv[2];
 
 
-    char buffer[BUFFER_SIZE];
+    char* buffer = new char[2048];
     int totalBytesReceived = 0;
     std::ofstream outFile;
     bool receivingFile = false;
     long long receivedFileSize = 0;
     long long receivedTextSize = 0;
     std::string filePath = "";
-    char bufferTextSize[BUFFER_SIZE];
-
+    char bufferTextSize[20];
+    int expectedSequenceNumber = 0;
+    int bufferReceivedFileSize = 0;
+    int bufferSize = 2048;
+    std::unordered_map<int, bool> receivedPackets;
     while (true) {
-        int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-
+        int bytesRead = recv(clientSocket, buffer, bufferSize, 0);
+        
         if (bytesRead <= 0) {
             break;
+            std::cout << "Done: "<< std::endl;
         }
         buffer[bytesRead] = '\0';
-
+        
         if (!receivingFile) {
             std::string command(buffer);
-
+           
             if (command.find("SendText") == 0) {
-                //Receive text size
-                bytesRead = recv(clientSocket, bufferTextSize, sizeof(bufferTextSize), 0);
-                if (bytesRead > 0) {
-                    bufferTextSize[bytesRead] = '\0';
-
-                    receivedTextSize = std::stoll(bufferTextSize);
-                    std::cout << "Received text size: " << receivedTextSize << std::endl;
-                }
-
+                std::cout << "Send Text here: " << std::endl;
+            
+                char bufferTextSize[20];
+                int bytesRead = recv(clientSocket, bufferTextSize, sizeof(bufferTextSize), 0);
                 std::string receivedText = "";
+                if (bytesRead > 0) {
+                  
+                    bufferTextSize[bytesRead] = '\0';
+                  
+                    long long receivedTextSize = std::stoll(bufferTextSize); 
+                    std::cout << "received text size" << receivedTextSize << std::endl;
 
-                //receive text
-                std::cout << "Text size:" << receivedTextSize << std::endl;
-                while (receivedText.size() < receivedTextSize) {
-                    int chunkBytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-                    if (chunkBytesRead <= 0) {
-                        break;
+                    char* bufferText = new char[receivedTextSize + 1];  
+                    long long bufferTxtSize = 2048;
+                    long long totalReceived = 0;
+
+                    while (totalReceived < receivedTextSize) {
+                        int chunkBytesRead = recv(clientSocket, bufferText, bufferTxtSize, 0);
+                        if (chunkBytesRead <= 0) {
+                            break;
+                        }
+                        totalReceived += chunkBytesRead;
+                        bufferText[chunkBytesRead] = '\0';
+                        receivedText += bufferText;
+                        std::cout << "Received text: " << receivedText << std::endl;
+                        std::cout << "total text: " << totalReceived << std::endl;
                     }
-                    buffer[chunkBytesRead] = '\0';
-                    receivedText += buffer;
+
+                    std::cout << "Received text: " << receivedText << std::endl;
+                    delete[] bufferText;  
                 }
-                std::cout << "Received text: " << receivedText << std::endl;
+
+                
 
                 std::string ackMessage = "Text content received successfully";
                 send(clientSocket, ackMessage.c_str(), ackMessage.size(), 0);
@@ -119,16 +138,31 @@ int main(int argc, char* argv[]) {
                 // Reset for next transmission
                 totalBytesReceived = 0;
                 receivingFile = true;
+                //receive bufferSize
+                char bufferSend[100];
+                bytesRead = recv(clientSocket, bufferSend, sizeof(bufferSend) - 1, 0);
+                bufferSend[bytesRead] = '\0';
 
-                // Receive file size
-                bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-                if (bytesRead > 0) {
-                    buffer[bytesRead] = '\0';
-                    std::cout << "Received file size string: " << buffer << std::endl;
-                    receivedFileSize = std::stoll(buffer);
+                std::string combinedDataReceived(bufferSend);
+
+             
+                size_t separatorPos = combinedDataReceived.find('|');
+                if (separatorPos != std::string::npos) {
+                    delete[] buffer;
+                    std::string bufferSizeStr = combinedDataReceived.substr(0, separatorPos);
+                   bufferReceivedFileSize = std::stoll(bufferSizeStr);
+                   buffer = new char[bufferReceivedFileSize];
+
+                   bufferSize = bufferReceivedFileSize;
+                   std::cout << "buffer file size: " << bufferReceivedFileSize << std::endl;
+                    std::string fileSizeStr = combinedDataReceived.substr(separatorPos + 1);
+
+                    filePath = outDirectory + "\\received_file" + fileSizeStr;
+                    receivedFileSize = std::stoll(fileSizeStr);
+                    std::cout << "received file size: " << receivedFileSize << std::endl;
                 }
 
-                filePath = outDirectory + "\\received_file" + buffer;
+               
                 outFile.open(filePath, std::ios::binary);
 
                 std::cout << "Receiving file: " << filePath << std::endl;
@@ -136,20 +170,57 @@ int main(int argc, char* argv[]) {
             }
         }
         else {
-            // Receive and write file data
-            outFile.write(buffer, bytesRead);
-            totalBytesReceived += bytesRead;
-            float percentReceived = static_cast<float>(totalBytesReceived) / receivedFileSize * 100.0f;
-            std::cout << "Received: " << totalBytesReceived << " bytes (" << percentReceived << "%)" << std::endl;
-
-            // Check receiving file is complete
-            if (totalBytesReceived >= receivedFileSize) {
-                receivingFile = false;
-                outFile.close();
-                std::cout << "File received and saved in: " << filePath << std::endl;
-                std::string ackMessage = "File content received successfully";
-                send(clientSocket, ackMessage.c_str(), ackMessage.size(), 0);
+           
+            unsigned int calculatedChecksum = 0;
+            std::cout << "byte read receiver:" << buffer << std::endl;
+            for (int i = 0; i < bytesRead; ++i) {
+                calculatedChecksum += static_cast<unsigned int>(buffer[i]);
             }
+            std::cout << "calculated Checksum receive:" << calculatedChecksum << std::endl;
+            unsigned int receivedChecksum = 0;
+            recv(clientSocket, reinterpret_cast<char*>(&receivedChecksum), sizeof(receivedChecksum), 0);
+            std::cout << "checksum receive:" << receivedChecksum << std::endl;
+            int receivedSequenceNumber = 0;
+            recv(clientSocket, reinterpret_cast<char*>(&receivedSequenceNumber), sizeof(receivedSequenceNumber), 0);
+            std::cout << "sequence numb receive:" << receivedSequenceNumber << std::endl;
+            
+
+            if (calculatedChecksum == receivedChecksum && receivedSequenceNumber == expectedSequenceNumber) {
+             
+                outFile.write(buffer, bytesRead);
+                std::cout << "Packet integrity verified." << std::endl;
+                receivedPackets[expectedSequenceNumber] = true;
+                send(clientSocket, "ACK", sizeof("ACK"), 0);
+               
+                while (receivedPackets.find(expectedSequenceNumber) != receivedPackets.end()) {
+                    receivedPackets.erase(expectedSequenceNumber);
+                    expectedSequenceNumber++;
+                }
+                totalBytesReceived += bytesRead;
+                float percentReceived = static_cast<float>(totalBytesReceived) / receivedFileSize * 100.0f;
+                std::cout << "Received: " << totalBytesReceived << " bytes (" << percentReceived << "%)" << std::endl;
+            }
+            else {
+                std::cout << "Packet integrity compromised. Requesting retransmission..." << std::endl;
+             
+                // NACK
+                send(clientSocket, "NACK", sizeof("NACK"), 0);
+                send(clientSocket, reinterpret_cast<char*>(&expectedSequenceNumber), sizeof(expectedSequenceNumber), 0);
+              
+
+            }
+            
+
+           //// Check receiving file is complete
+           if (totalBytesReceived >= receivedFileSize) {
+               receivingFile = false;
+               outFile.close();
+
+               std::cout << "File received and saved in: " << filePath << std::endl;
+              std::string ackMessage = "File content received successfully";
+              send(clientSocket, ackMessage.c_str(), ackMessage.size(), 0);
+           }
+
         }
     }
 
@@ -158,7 +229,7 @@ int main(int argc, char* argv[]) {
         outFile.close();
         std::cout << "File received and saved in: " << filePath << std::endl;
     }
-
+    delete[] buffer;
     //clean up
     closesocket(clientSocket);
     closesocket(serverSocket);
